@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	//"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +23,7 @@ import (
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/openstack"
-	//"encoding/json"
+	"encoding/json"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -31,21 +31,28 @@ import (
 
 type Edge struct {
 	Src, Dst string
-	Weight   int
+}
+
+type WeightedEdge struct {
+	Edge   Edge
+	Weight int
 }
 
 type Map map[string][]string
 
 type Graph struct {
 	Neighbours Map
-	Edges      []Edge
+	Edges      []WeightedEdge
 }
 
-func (g *Graph) Create(edges []Edge) {
-	g.Edges = edges
+func (g *Graph) Create(edges []WeightedEdge) {
+	g.Edges = make([]WeightedEdge, 0)
 	g.Neighbours = make(Map)
 	for _, edge := range edges {
-		g.Neighbours[edge.Src] = append(g.Neighbours[edge.Src], edge.Dst)
+		if edge.Edge.Src != "" && edge.Edge.Dst != "" && edge.Weight > 0 {
+			g.Neighbours[edge.Edge.Src] = append(g.Neighbours[edge.Edge.Src], edge.Edge.Dst)
+			g.Edges = append(g.Edges, edge)
+		}
 	}
 }
 
@@ -65,42 +72,79 @@ func tick(ticker *time.Ticker) {
 	}
 }
 
-func getPacketInfo(packet gopacket.Packet, i int) {
-	fmt.Printf("Decoding packet %d", i)
-	ethLayer := packet.Layer(layers.LayerTypeEthernet)
-	if ethLayer != nil {
-		fmt.Printf("\tEth Layer Detected\n")
-		ethPacket, _ := ethLayer.(*layers.Ethernet)
-		fmt.Printf("\t\tSource MAC %s\n", ethPacket.SrcMAC)
-		fmt.Printf("\t\tDest MAC %s\n", ethPacket.DstMAC)
-		fmt.Printf("\t\tEth type %s\n", ethPacket.EthernetType)
+func getPacketInfo(packet gopacket.Packet) (ipSrc string, ipDst string) {
+	if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
+		ip, _ := ip4Layer.(*layers.IPv4)
+		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+			// Only care for packets that have a TCP layer (data stream)
+			return ip.SrcIP.String(), ip.DstIP.String()
+		}
+	} else if ip6Layer := packet.Layer(layers.LayerTypeIPv6); ip6Layer != nil {
+		ip, _ := ip4Layer.(*layers.IPv6)
+		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+			// Only care for packets that have a TCP layer (data stream)
+			return ip.SrcIP.String(), ip.DstIP.String()
+		}
 	}
-	ipLayer := packet.Layer(layers.LayerTypeIPv4)
-	if ipLayer != nil {
-		fmt.Printf("\tIP Layer Detected\n")
-		ip, _ := ipLayer.(*layers.IPv4)
-		fmt.Printf("\t\tFrom %s to %s\n", ip.SrcIP, ip.DstIP)
-		fmt.Printf("\t\tProtocol: %s", ip.Protocol)
-	}
-	tcpLayer := packet.Layer(layers.LayerTypeTCP)
-	if tcpLayer != nil {
-		fmt.Printf("\tTCP Layer Detected\n")
-		tcp, _ := tcpLayer.(*layers.TCP)
-		fmt.Printf("\t\tFrom port %d to %d\n", tcp.SrcPort, tcp.DstPort)
-		fmt.Printf("\t\tSequence Number: %d\n", tcp.Seq)
-	}
+	return "", ""
 }
-func parseTCPDumpFile(filename string) {
+
+func parseTCPDumpFile(filename string, ip2name map[string]string) (edges []Edge) {
+
 	handleRead, err := pcap.OpenOffline(filename)
 	if err != nil {
 		fmt.Printf("PCAP Offline open file error: %s\n", err)
 	}
 	defer handleRead.Close()
 	packets := gopacket.NewPacketSource(handleRead, handleRead.LinkType())
-	i := 0
+	edges = make([]Edge, 0)
 	for packet := range packets.Packets() {
-		getPacketInfo(packet, i)
-		i += 1
+
+		ipSrc, ipDst := getPacketInfo(packet)
+		w := 0
+		if ipSrc != "" && ipDst != "" {
+			w = 1
+		}
+		if w == 1 {
+			if _, ok := ip2name[ipSrc]; ok {
+				if _, ok2 := ip2name[ipDst]; ok2 {
+					edges = append(edges, Edge{ip2name[ipSrc], ip2name[ipDst]})
+				}
+			}
+		}
+	}
+	if len(edges) > 0 {
+		return edges
+	}
+	return nil
+}
+
+func tryParseFile(filename string) {
+	handleRead, err := pcap.OpenOffline(filename)
+	if err != nil {
+		fmt.Printf("PCAP Offline open file error: %s\n", err)
+	}
+	defer handleRead.Close()
+	packetSource := gopacket.NewPacketSource(handleRead, handleRead.LinkType())
+	for packet := range packetSource.Packets() {
+		fmt.Printf("LAYERS: [")
+		for i, layer := range packet.Layers() {
+			if i != 0 {
+				fmt.Printf(" %s", layer.LayerType())
+			} else {
+				fmt.Printf("%s", layer.LayerType())
+			}
+		}
+		fmt.Printf("]\n")
+		if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
+			ip, _ := ip4Layer.(*layers.IPv4)
+			fmt.Printf("\t%s %s\n", ip.SrcIP.String(), ip.DstIP.String())
+		} else if ip6Layer := packet.Layer(layers.LayerTypeIPv6); ip6Layer != nil {
+			ip, _ := ip4Layer.(*layers.IPv6)
+			fmt.Printf("\t%s %s\n", ip.SrcIP.String(), ip.DstIP.String())
+		} else {
+			fmt.Printf("\tNO IP LAYER FOUND\n")
+		}
 	}
 }
 
@@ -129,10 +173,24 @@ func main() {
 	if err != nil {
 		panic(err.Error())
 	}
+	services, err := clientset.CoreV1().Services(namespace).List(metav1.ListOptions{})
+	if err != nil {
+		panic(err.Error())
+	}
 	fmt.Printf("There are %d pods in the namespace %s of the cluster\n", len(pods.Items), namespace)
+	fmt.Printf("There are %d services in the namespace %s of the cluster\n", len(services.Items), namespace)
+
+	ip2name := make(map[string]string)
+	for i, service := range services.Items {
+		fmt.Printf("SERVICE: %d: name [%s] ip [%s]\n", i, service.Name, service.Spec.ClusterIP)
+		ip2name[service.Spec.ClusterIP] = service.Name
+	}
+
 	cmds := make(map[string]*exec.Cmd)
+	dumpfiles := make([]string, 0, len(pods.Items))
 	for i, pod := range pods.Items {
-		fmt.Printf("%d: name [%s] ip [%s] containers [", i, pod.Name, pod.Status.PodIP)
+		fmt.Printf("POD: %d: name [%s] ip [%s] containers [", i, pod.Name, pod.Status.PodIP)
+		ip2name[pod.Status.PodIP] = pod.Name
 		for j, container := range pod.Spec.Containers {
 			if j == 0 {
 				fmt.Printf("%s", container.Name)
@@ -141,9 +199,12 @@ func main() {
 			}
 		}
 		fmt.Printf("]\n")
-		cmds[pod.Name] = startCommand("kubectl", "sniff", pod.Name, "-c", pod.Spec.Containers[0].Name, "-o", pod.Spec.Containers[0].Name+".tcpdump")
+		dumpfilename := pod.Spec.Containers[0].Name + ".tcpdump"
+		cmds[pod.Name] = startCommand("kubectl", "sniff", pod.Name, "-c", pod.Spec.Containers[0].Name, "-o", dumpfilename)
 		if cmds[pod.Name] == nil {
 			panic(fmt.Sprintf("Cound't start sniffer on pod %s", pod.Name))
+		} else {
+			dumpfiles = append(dumpfiles, dumpfilename)
 		}
 	}
 	fmt.Printf("Go use the application!.... [waiting]\n")
@@ -160,23 +221,36 @@ func main() {
 	}
 	fmt.Printf("Killing processes\n")
 	for key, value := range cmds {
-		fmt.Printf("Killing %s\n", key)
+		fmt.Printf("Killing %s sniffer\n", key)
 		value.Process.Signal(os.Kill)
 	}
 	fmt.Printf("Done\n")
-	parseTCPDumpFile(pods.Items[0].Spec.Containers[0].Name + ".tcpdump")
-	/*
-
-		var edges []Edge
-		edges = append(edges, Edge{"0", "1", 2})
-		edges = append(edges, Edge{"2", "1", -1})
-		edges = append(edges, Edge{"1", "0", 3})
-		edges = append(edges, Edge{"2", "0", -3})
-		var graph Graph
-		graph.Create(edges)
-		jsonData, err := json.MarshalIndent(graph, "", "    ")
-		fmt.Printf("%s\n", jsonData)
-	*/
+	edges := make([]Edge, 0)
+	for _, file := range dumpfiles {
+		mEdges := parseTCPDumpFile(file, ip2name)
+		edges = append(edges, mEdges...)
+	}
+	wEdges := make(map[Edge]*WeightedEdge)
+	for _, edge := range edges {
+		if _, ok := wEdges[edge]; ok {
+			wEdges[edge].Weight += 1
+		} else {
+			wEdge := WeightedEdge{edge, 1}
+			wEdges[edge] = &wEdge
+		}
+	}
+	gEdges := make([]WeightedEdge, len(wEdges), len(wEdges))
+	for _, val := range wEdges {
+		gEdges = append(gEdges, *val)
+	}
+	var graph Graph
+	graph.Create(gEdges)
+	jsonData, err := json.MarshalIndent(graph, "", "    ")
+	ferr := ioutil.WriteFile("couplingGraph.json", jsonData, 0644)
+	if ferr != nil {
+		panic(ferr)
+	}
+	fmt.Printf("Finished! Wrote file couplingGraph.json\n")
 }
 
 func homeDir() string {
