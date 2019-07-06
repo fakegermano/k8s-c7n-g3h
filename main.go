@@ -34,8 +34,9 @@ type Edge struct {
 }
 
 type WeightedEdge struct {
-	Edge   Edge
-	Weight int
+	Edge          Edge
+	WeightPercent float64
+	Weight        int
 }
 
 type Map map[string][]string
@@ -46,13 +47,24 @@ type Graph struct {
 }
 
 func (g *Graph) Create(edges []WeightedEdge) {
-	g.Edges = make([]WeightedEdge, 0)
+	gEdges := make([]WeightedEdge, 0)
 	g.Neighbours = make(Map)
+	totalsVertex := make(map[string]float64)
 	for _, edge := range edges {
 		if edge.Edge.Src != "" && edge.Edge.Dst != "" && edge.Weight > 0 {
+			if _, ok := totalsVertex[edge.Edge.Src]; ok {
+				totalsVertex[edge.Edge.Src] += float64(edge.Weight)
+			} else {
+				totalsVertex[edge.Edge.Src] = float64(edge.Weight)
+			}
 			g.Neighbours[edge.Edge.Src] = append(g.Neighbours[edge.Edge.Src], edge.Edge.Dst)
-			g.Edges = append(g.Edges, edge)
+			gEdges = append(gEdges, edge)
 		}
+	}
+	g.Edges = make([]WeightedEdge, 0)
+	for _, edge := range gEdges {
+		pEdge := WeightedEdge{edge.Edge, float64(edge.Weight) / totalsVertex[edge.Edge.Src], edge.Weight}
+		g.Edges = append(g.Edges, pEdge)
 	}
 }
 
@@ -167,6 +179,7 @@ func main() {
 			}
 		}
 		fmt.Printf("]\n")
+		// TODO say error if kubectl sniff is not installed
 		dumpfilename := pod.Spec.Containers[0].Name + ".tcpdump"
 		cmds[pod.Name] = startCommand("kubectl", "sniff", pod.Name, "-c", pod.Spec.Containers[0].Name, "-o", dumpfilename)
 		if cmds[pod.Name] == nil {
@@ -198,18 +211,18 @@ func main() {
 	for _, file := range dumpfiles {
 		wg.Add(1)
 		go parseTCPDumpFile(file, ip2name, edges, wg)
+		defer os.Remove(file)
 	}
 	go func() {
 		wg.Wait()
 		close(edges)
 	}()
-
 	wEdges := make(map[Edge]*WeightedEdge)
 	for edge := range edges {
 		if _, ok := wEdges[edge]; ok {
 			wEdges[edge].Weight += 1
 		} else {
-			wEdge := WeightedEdge{edge, 1}
+			wEdge := WeightedEdge{edge, 0, 1}
 			wEdges[edge] = &wEdge
 		}
 	}
