@@ -8,8 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
-
 	// "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -72,6 +72,7 @@ func tick(ticker *time.Ticker) {
 	}
 }
 
+// TODO: Better decode the layers (using maybe a faster recyclable way)
 func getPacketInfo(packet gopacket.Packet) (ipSrc string, ipDst string) {
 	if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
 		ip, _ := ip4Layer.(*layers.IPv4)
@@ -89,15 +90,15 @@ func getPacketInfo(packet gopacket.Packet) (ipSrc string, ipDst string) {
 	return "", ""
 }
 
-func parseTCPDumpFile(filename string, ip2name map[string]string) (edges []Edge) {
-
+func parseTCPDumpFile(filename string, ip2name map[string]string, edges chan Edge, wg *sync.WaitGroup) {
+	defer wg.Done()
 	handleRead, err := pcap.OpenOffline(filename)
 	if err != nil {
 		fmt.Printf("PCAP Offline open file error: %s\n", err)
 	}
 	defer handleRead.Close()
 	packets := gopacket.NewPacketSource(handleRead, handleRead.LinkType())
-	edges = make([]Edge, 0)
+
 	for packet := range packets.Packets() {
 
 		ipSrc, ipDst := getPacketInfo(packet)
@@ -108,42 +109,9 @@ func parseTCPDumpFile(filename string, ip2name map[string]string) (edges []Edge)
 		if w == 1 {
 			if _, ok := ip2name[ipSrc]; ok {
 				if _, ok2 := ip2name[ipDst]; ok2 {
-					edges = append(edges, Edge{ip2name[ipSrc], ip2name[ipDst]})
+					edges <- Edge{ip2name[ipSrc], ip2name[ipDst]}
 				}
 			}
-		}
-	}
-	if len(edges) > 0 {
-		return edges
-	}
-	return nil
-}
-
-func tryParseFile(filename string) {
-	handleRead, err := pcap.OpenOffline(filename)
-	if err != nil {
-		fmt.Printf("PCAP Offline open file error: %s\n", err)
-	}
-	defer handleRead.Close()
-	packetSource := gopacket.NewPacketSource(handleRead, handleRead.LinkType())
-	for packet := range packetSource.Packets() {
-		fmt.Printf("LAYERS: [")
-		for i, layer := range packet.Layers() {
-			if i != 0 {
-				fmt.Printf(" %s", layer.LayerType())
-			} else {
-				fmt.Printf("%s", layer.LayerType())
-			}
-		}
-		fmt.Printf("]\n")
-		if ip4Layer := packet.Layer(layers.LayerTypeIPv4); ip4Layer != nil {
-			ip, _ := ip4Layer.(*layers.IPv4)
-			fmt.Printf("\t%s %s\n", ip.SrcIP.String(), ip.DstIP.String())
-		} else if ip6Layer := packet.Layer(layers.LayerTypeIPv6); ip6Layer != nil {
-			ip, _ := ip4Layer.(*layers.IPv6)
-			fmt.Printf("\t%s %s\n", ip.SrcIP.String(), ip.DstIP.String())
-		} else {
-			fmt.Printf("\tNO IP LAYER FOUND\n")
 		}
 	}
 }
@@ -162,7 +130,7 @@ func main() {
 	if err != nil {
 		panic(err.Error())
 	}
-
+	flag.Parse()
 	// create the clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
@@ -225,13 +193,19 @@ func main() {
 		value.Process.Signal(os.Kill)
 	}
 	fmt.Printf("Done\n")
-	edges := make([]Edge, 0)
+	edges := make(chan Edge)
+	wg := &sync.WaitGroup{}
 	for _, file := range dumpfiles {
-		mEdges := parseTCPDumpFile(file, ip2name)
-		edges = append(edges, mEdges...)
+		wg.Add(1)
+		go parseTCPDumpFile(file, ip2name, edges, wg)
 	}
+	go func() {
+		wg.Wait()
+		close(edges)
+	}()
+
 	wEdges := make(map[Edge]*WeightedEdge)
-	for _, edge := range edges {
+	for edge := range edges {
 		if _, ok := wEdges[edge]; ok {
 			wEdges[edge].Weight += 1
 		} else {
