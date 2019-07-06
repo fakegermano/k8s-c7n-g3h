@@ -1,5 +1,5 @@
-# k8s-c7n-g3h
-This is a basic kubernetes connection graph visualizer to evaluate the growth
+# Kubernetes Coupling Graph
+This is a basic kubernetes coupling graph visualizer to evaluate the growth
 and coupling of microsservice architecture built applications
 
 ## Requirements
