@@ -51,7 +51,7 @@ func (g *Graph) Create(edges []WeightedEdge) {
 	g.Neighbours = make(Map)
 	totalsVertex := make(map[string]float64)
 	for _, edge := range edges {
-		if edge.Edge.Src != "" && edge.Edge.Dst != "" && edge.Weight > 0 {
+		if edge.Edge.Src != "" && edge.Edge.Dst != "" && edge.Edge.Src != edge.Edge.Dst && edge.Weight > 0 {
 			if _, ok := totalsVertex[edge.Edge.Src]; ok {
 				totalsVertex[edge.Edge.Src] += float64(edge.Weight)
 			} else {
